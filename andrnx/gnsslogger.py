@@ -13,6 +13,11 @@ STATE_CODE_LOCK = int(0x00000001)
 STATE_BIT_SYNC = int(0x00000002)
 STATE_TOW_DECODED = int(0x00000008)
 
+# AccumulatedDeltaRangeState
+ADR_STATE_CYCLE_SLIP = int(0x00000004)
+ADR_STATE_RESET = int(0x00000002)
+ADR_STATE_HALF_CYCLE_REPORTED = int(0x00000010)
+
 # Define constants
 SPEED_OF_LIGHT = 299792458.0; # [m/s]
 GPS_WEEKSECS = 604800 # Number of seconds in a week
@@ -167,9 +172,11 @@ class GnssLog(object):
         the CONVERTER structure. If an exeception occurs, the field will be
         left as is.
         """
-
-        if fname in GnssLog.CONVERTER:
-                return GnssLog.CONVERTER[fname](valuestr);
+        try:
+            if fname in GnssLog.CONVERTER:
+                return GnssLog.CONVERTER[fname](valuestr)
+        except ValueError:
+                return ''
 
         try:
                 return float(valuestr)
@@ -213,6 +220,9 @@ class GnssLog(object):
                         yield batch
                         batch = []
 
+                # if line_fields['ConstellationType'] != 1:
+                #     continue
+
                 batch.append(line_fields)
 
             # Yield last batch
@@ -245,9 +255,16 @@ def get_rnx_band_from_freq(frequency):
     >>> get_rnx_band_from_freq(1176450050.0)
     5
     """
+    if frequency == 1561097980: #bds B1 2X
+        return 2
 
     # Backwards compatibility with empty fields (assume GPS L1)
-    ifreq = 154 if frequency == '' else round(frequency / 10.23e6)
+    #ifreq = 154 if frequency == '' else round(frequency / 10.23e6)
+
+    ifreq = 0 if frequency == '' else round(frequency / 10.23e6)
+
+    # if frequency == 0:
+    #     return 0
 
     if ifreq >= 154:
         return 1
@@ -256,7 +273,7 @@ def get_rnx_band_from_freq(frequency):
     else:
         raise ValueError("Cannot get Rinex frequency band from frequency [ {0} ]\n".format(frequency))
 
-    return ifreq
+
 
 # ------------------------------------------------------------------------------
 
@@ -272,6 +289,10 @@ def get_rnx_attr(band):
     if band == 5:
         attr = 'X'
 
+    if band == 2:
+        attr = 'X'
+
+
     return attr
 
 # ------------------------------------------------------------------------------
@@ -281,6 +302,8 @@ def get_frequency(measurement):
     v = measurement['CarrierFrequencyHz']
 
     return 154 * 10.23e6 if v == '' else v
+
+    #return 154 if v == '' else v
 
 # ------------------------------------------------------------------------------
 
@@ -311,6 +334,7 @@ def get_obslist(batches):
         'G' : [C1C, L1C, D1C, S1C, C5X],
         'E' : [C1C, L1C, D1C, C5X],
         'R' : [C1P, C2P]
+        'C' : [C2X, L2X, D2X, C2X],
     }
     """
 
@@ -342,18 +366,25 @@ def get_obslist(batches):
 
 # ------------------------------------------------------------------------------
 
+def check_lli(state):
+    # todo:加入半周反转的判断
+    if (state & ADR_STATE_CYCLE_SLIP) == 0:
+        return 1
+    if (state & ADR_STATE_RESET) == 0:
+        return 1
+
+    return 0
+
 def check_state(state):
     """
     Checks if measurement is valid or not based on the Sync bits
     """
-
     if (state & STATE_CODE_LOCK) == 0:
         raise ValueError("State [ 0x{0:2x} {0:8b} ] has STATE_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state, STATE_CODE_LOCK))
 
     if (state & STATE_TOW_DECODED) == 0:
         raise ValueError("State [ 0x{0:2x} {0:8b} ] has STATE_TOW_DECODED [ 0x{1:2x} {1:8b} ] not valid".format(state, STATE_TOW_DECODED))
 
-    return True
 
 # ------------------------------------------------------------------------------
 
@@ -367,6 +398,8 @@ def get_satname(measurement):
     'E11'
     >>> get_satname({'ConstellationType': 3, 'Svid': 24})
     'R24'
+    >>> get_satname({'ConstellationType': 5, 'Svid': 1})
+    'C1'
     """
 
     ctype = measurement['ConstellationType']
@@ -409,9 +442,15 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
 
     obscode = get_obscode(measurement)
 
+    # 检测是否发生周跳
+    lockflag = check_lli(measurement['AccumulatedDeltaRangeState'])
+
+
+    # todo:有其它待检测的状态值
+
     # Skip this measurement if no synched
     try:
-        check_state(measurement['State'])
+        lockflag = check_state(measurement['State'])
     except ValueError as e:
         sys.stderr.write("-- WARNING: {0} for satellite [ {1} ]\n".format(e, satname))
 
@@ -420,6 +459,15 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
     fullbiasnanos = measurement['FullBiasNanos'] if fullbiasnanos is None else fullbiasnanos
 
     # Obtain time nanos and bias nanos. Skip if None
+
+    # CONSTELLATION_GPS = 1
+    # CONSTELLATION_SBAS = 2
+    # CONSTELLATION_GLONASS = 3
+    # CONSTELLATION_QZSS = 4
+    # CONSTELLATION_BEIDOU = 5
+    # CONSTELLATION_GALILEO = 6
+    # CONSTELLATION_UNKNOWN = 0
+
     try:
         timenanos = float(measurement['TimeNanos'])
     except ValueError:
@@ -451,7 +499,27 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
 
     # Compute the reception and transmission times
     tRxSeconds = gpssow - timeoffsetnanos * NS_TO_S
-    tTxSeconds = measurement['ReceivedSvTimeNanos'] * NS_TO_S
+
+    ctype = measurement['ConstellationType']
+    tTxSeconds = 0
+    if ctype == 1:# gps
+        tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+    elif ctype == 2:
+        tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+    elif ctype == 3:# glo
+        tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+        txint = round(tRxSeconds/86400)*86400
+        tTxSeconds = round(tRxSeconds/86400)*86400 - 10800 + tTxSeconds + 18
+    elif ctype == 4:
+        tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+    elif ctype == 5: # bds
+        tTxSeconds = measurement['ReceivedSvTimeNanos'] * NS_TO_S + 14
+    elif ctype == 6: # gal
+        tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+    else:
+        tTxSeconds = 0
+
+    #tTxSeconds = measurement['ReceivedSvTimeNanos'] * NS_TO_S
 
     # Compute the travel time, which will be eventually the pseudorange
     tau = tRxSeconds - tTxSeconds
@@ -462,7 +530,7 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
 
     # Compute the range as the difference between the received time and
     # the transmitted time
-    range = tau * SPEED_OF_LIGHT - pseudorange_bias;
+    range = tau * SPEED_OF_LIGHT - pseudorange_bias
 
     # Check if the range needs to be modified with the range rate in
     # order to make it consistent with the timestamp
@@ -484,11 +552,14 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
              satname : { 'C' + obscode : range,
                          'L' + obscode : cphase,
                          'D' + obscode : doppler,
-                         'S' + obscode : cn0}}
-
-# ------------------------------------------------------------------------------
+                         'S' + obscode : cn0,
+                         'LLI' : lockflag
+                         }
+             }
 
 def merge(measdict):
+# ------------------------------------------------------------------------------
+
     """
     Merge a list of processed batches, which are dictonaries with an epoch
     and an internal dictionary with the satellite measurements

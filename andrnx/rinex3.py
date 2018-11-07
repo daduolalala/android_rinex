@@ -267,7 +267,7 @@ def write_obs(mdict, obslist, flag=0):
             except KeyError:
                 meas = 0.0
 
-            if meas > 30e6:
+            if meas > 40e6:
                 meas = 0.0
 
             res += '{0:14.3f}00'.format(meas)
