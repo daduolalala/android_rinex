@@ -75,6 +75,7 @@ if __name__ == "__main__":
                                       fullbiasnanos=fullbiasnanos,
                                       integerize=args.integerize,
                                        pseudorange_bias=args.pseudorange_bias)
+
     batches = [alogger.merge([proc(m) for m in rm]) for rm in raw_batches]
 
     obslist = alogger.get_obslist(raw_batches)

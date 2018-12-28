@@ -240,22 +240,30 @@ def write_obs(mdict, obslist, flag=0):
     """
     """
     # Print epoch
-    epoch = mdict['epoch']
-    res = epoch.strftime("> %Y %m %d %H %M %S.") + '{0:06d}0'.format(int(epoch.microsecond))
+    # epoch = mdict['epoch']
+    # res = epoch.strftime("> %Y %m %d %H %M %S.") + '{0:06d}0'.format(int(epoch.microsecond))
+    #
+    # # Epoch flag
+    # res += " {0:2d}".format(flag)
+    #
+    # # Num sats
+    # res += " {0:2d}".format(len(mdict)-1)
+    #
+    # res += '\n'
 
-    # Epoch flag
-    res += " {0:2d}".format(flag)
-
-    # Num sats
-    res += " {0:2d}".format(len(mdict)-1)
-
-    res += '\n'
+    res = ''
 
     # For each satellite, print obs
+    nsat = 0
     for sat in mdict:
         if sat == 'epoch':
             continue
 
+        # 剔除未能码同步的卫星
+        if mdict[sat]['TRACK'] == 1:
+            continue
+
+        nsat += 1
         res += sat
 
         obstypes = obslist[sat[0]]
@@ -270,11 +278,27 @@ def write_obs(mdict, obslist, flag=0):
             if meas > 40e6:
                 meas = 0.0
 
-            res += '{0:14.3f}00'.format(meas)
+            res += '{0:14.3f}'.format(meas)
+
+            if  o[0] == 'L' and mdict[sat]['LLI'] == 1 :
+                res += '10'
+            else:
+                res += '00'
 
         res += '\n'
 
-    return res
+    epoch = mdict['epoch']
+    res_h = epoch.strftime("> %Y %m %d %H %M %S.") + '{0:06d}0'.format(int(epoch.microsecond))
+
+    # Epoch flag
+    res_h += " {0:2d}".format(flag)
+
+    # Num sats
+    res_h += " {0:2d}".format(nsat)
+
+    res_h += '\n'
+
+    return res_h+res
 
 # ------------------------------------------------------------------------------
 

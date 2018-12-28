@@ -1,3 +1,6 @@
+#coding:utf-8
+
+
 #!/usr/bin/env python3
 """
 Module to process log files from Google's Android GNSS Logger app
@@ -7,19 +10,24 @@ import math
 import re
 import sys
 
+
+
 # Flags to check wether the measurement is correct or not
 # https://developer.android.com/reference/android/location/GnssMeasurement.html#getState()
 STATE_CODE_LOCK = int(0x00000001)
 STATE_BIT_SYNC = int(0x00000002)
 STATE_TOW_DECODED = int(0x00000008)
+STATE_GLO_TOD_DECODED = int(0x00000080)
+STATE_GAL_E1BC_CODE_LOCK = int(0x00000400)
 
 # AccumulatedDeltaRangeState
+ADR_STATE_VALID = int(0x00000001)
 ADR_STATE_CYCLE_SLIP = int(0x00000004)
 ADR_STATE_RESET = int(0x00000002)
 ADR_STATE_HALF_CYCLE_REPORTED = int(0x00000010)
 
 # Define constants
-SPEED_OF_LIGHT = 299792458.0; # [m/s]
+SPEED_OF_LIGHT = 299792458.0 # [m/s]
 GPS_WEEKSECS = 604800 # Number of seconds in a week
 NS_TO_S = 1.0e-9
 NS_TO_M = NS_TO_S * SPEED_OF_LIGHT  # Constant to transform from nanoseconds to meters
@@ -30,6 +38,8 @@ GPSTIME = datetime.datetime(1980, 1, 6)
 OBS_LIST = ['C', 'L', 'D', 'S']
 
 EPOCH_STR = 'epoch'
+
+HCCC = 0.0
 
 # Constellation types
 CONSTELLATION_GPS = 1
@@ -50,10 +60,15 @@ CONSTELLATION_LETTER = {
         CONSTELLATION_UNKNOWN : 'X'
 }
 
+
+
+
 class GnssLogHeader(object):
     """
     Class that manages the header from the log file.
     """
+
+
 
     def __init__(self, filename):
         """
@@ -216,6 +231,10 @@ class GnssLog(object):
 
                 line_fields = self.__parse_line__(line)
 
+
+                if len(line_fields) != 29:
+                    continue
+
                 if len(batch) > 0 and line_fields[self.BATCH_DELIMITER] != batch[0][self.BATCH_DELIMITER]:
                         yield batch
                         batch = []
@@ -244,84 +263,92 @@ class GnssLog(object):
 
 # ------------------------------------------------------------------------------
 
-def get_rnx_band_from_freq(frequency):
-    """
-    Obtain the frequency band
-
-    >>> get_rnx_band_from_freq(1575420030.0)
-    1
-    >>> get_rnx_band_from_freq(1600875010.0)
-    1
-    >>> get_rnx_band_from_freq(1176450050.0)
-    5
-    """
-    if frequency == 1561097980: #bds B1 2X
-        return 2
-
-    # Backwards compatibility with empty fields (assume GPS L1)
-    #ifreq = 154 if frequency == '' else round(frequency / 10.23e6)
-
-    ifreq = 0 if frequency == '' else round(frequency / 10.23e6)
-
-    # if frequency == 0:
-    #     return 0
-
-    if ifreq >= 154:
-        return 1
-    elif ifreq == 115:
-        return 5
-    else:
-        raise ValueError("Cannot get Rinex frequency band from frequency [ {0} ]\n".format(frequency))
-
-
-
-# ------------------------------------------------------------------------------
-
-
-def get_rnx_attr(band):
-    """
-    Generate the RINEX 3 attribute from a given band. Assumes 'C' for L1/E1
-    frequency and 'X' for L5/E5a frequency. For E5a it assumes I+Q tracking.
-    """
-
-    attr = 'C'
-
-    if band == 5:
-        attr = 'X'
-
-    if band == 2:
-        attr = 'X'
-
-
-    return attr
-
-# ------------------------------------------------------------------------------
 
 def get_frequency(measurement):
 
     v = measurement['CarrierFrequencyHz']
 
-    return 154 * 10.23e6 if v == '' else v
+    # 如果为空,则返回 GPS_L1 的频率
+    # return 1575420000 if v == '' else v
 
-    #return 154 if v == '' else v
+    ctype = CONSTELLATION_GPS if measurement['ConstellationType'] == '' else measurement['ConstellationType']
+
+    if v != '':
+        return v
+
+    if ctype == 1: # gps
+        return 1575450000
+
+    elif ctype == 2: # sbas
+        return 1575420000
+
+    elif ctype == 3:# glo
+        return 1602000000
+
+    elif ctype == 4: # qzss
+        return 1575420000
+
+    elif ctype == 5: # bds
+        return 1561098000
+
+    elif ctype == 6: # gal
+        return 1575420000
+    else:
+        tTxSeconds = 0
+
 
 # ------------------------------------------------------------------------------
 
 def get_obscode(measurement):
-    """
-    Obtain the measurement code (RINEX 3 format)
 
-    >>> get_obscode({'CarrierFrequencyHz': 1575420030.0})
-    '1C'
-    >>> get_obscode({'CarrierFrequencyHz': 1176450050.0})
-    '5X'
-    """
+    ctype = CONSTELLATION_GPS if measurement['ConstellationType'] == '' else measurement['ConstellationType']
 
-    band = get_rnx_band_from_freq(get_frequency(measurement))
+    frequency = get_frequency(measurement)
 
-    attr = get_rnx_attr(band)
+    ifreq = 0 if frequency == '' else round(frequency / 10.23e6)
 
-    return '{0}{1}'.format(band, attr)
+    if ctype == CONSTELLATION_GPS:  # gps 1C 2C 5X
+        if ifreq == 154:
+            return '1C'
+        elif ifreq == 115:
+            return '5X'
+        else:
+            raise ValueError("Cannot get Rinex frequency band: sys={0},freq={1}\n".format(ctype, frequency))
+
+    elif ctype == CONSTELLATION_SBAS: # SBAS
+        return '1C'
+
+    elif ctype == CONSTELLATION_GLONASS: # GLONASS
+        return '1C'
+
+    elif ctype == CONSTELLATION_QZSS: # QZSS
+        if ifreq == 154:
+            return '1C'
+        elif ifreq == 115:
+            return '5X'
+        else:
+            raise ValueError("Cannot get Rinex frequency band: sys={0},freq={1}\n".format(ctype, frequency))
+
+    elif ctype == CONSTELLATION_BEIDOU:  # bds 1I 7I 6I
+        if ifreq == 153:
+            return '1I'
+        elif ifreq == 118:
+            return '7I'
+        elif ifreq == 123:
+            return '6I'
+        else:
+            raise ValueError("Cannot get Rinex frequency band: sys={0},freq={1}\n".format(ctype, frequency))
+
+    elif ctype == CONSTELLATION_GALILEO: # gal 1C 5I
+        if ifreq == 154:
+            return '1C'
+        elif ifreq == 115:
+            return '5X'
+        else:
+            raise ValueError("Cannot get Rinex frequency band: sys={0},freq={1}\n".format(ctype, frequency))
+
+    else:
+        raise ValueError("Cannot get Rinex frequency band: sys={0}\n".format(ctype))
 
 # ------------------------------------------------------------------------------
 
@@ -334,7 +361,7 @@ def get_obslist(batches):
         'G' : [C1C, L1C, D1C, S1C, C5X],
         'E' : [C1C, L1C, D1C, C5X],
         'R' : [C1P, C2P]
-        'C' : [C2X, L2X, D2X, C2X],
+        'C' : [C1I, L1I, D1I, S1I],
     }
     """
 
@@ -368,22 +395,51 @@ def get_obslist(batches):
 
 def check_lli(state):
     # todo:加入半周反转的判断
-    if (state & ADR_STATE_CYCLE_SLIP) == 0:
-        return 1
-    if (state & ADR_STATE_RESET) == 0:
-        return 1
 
-    return 0
+    # if (state & ADR_STATE_VALID) == 0:
+    #     raise ValueError("State [ 0x{0:2x} {0:8b} ] not ADR_STATE_VALID [ 0x{1:2x} {1:8b} ] not valid".format(state,ADR_STATE_VALID))
 
-def check_state(state):
+    if (state & ADR_STATE_CYCLE_SLIP) != 0:
+        raise ValueError("State [ 0x{0:2x} {0:8b} ] has ADR_STATE_CYCLE_SLIP [ 0x{1:2x} {1:8b} ] not valid".format(state, ADR_STATE_CYCLE_SLIP))
+
+    if (state & ADR_STATE_RESET) != 0:
+        raise ValueError("State [ 0x{0:2x} {0:8b} ] has ADR_STATE_RESET [ 0x{1:2x} {1:8b} ] not valid".format(state,ADR_STATE_RESET))
+
+
+def check_state(ctype, obscode, state):
     """
     Checks if measurement is valid or not based on the Sync bits
     """
-    if (state & STATE_CODE_LOCK) == 0:
-        raise ValueError("State [ 0x{0:2x} {0:8b} ] has STATE_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state, STATE_CODE_LOCK))
 
-    if (state & STATE_TOW_DECODED) == 0:
-        raise ValueError("State [ 0x{0:2x} {0:8b} ] has STATE_TOW_DECODED [ 0x{1:2x} {1:8b} ] not valid".format(state, STATE_TOW_DECODED))
+    if ctype == CONSTELLATION_GPS or ctype == CONSTELLATION_QZSS:
+        if (state & STATE_CODE_LOCK) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_CODE_LOCK))
+        if (state & STATE_TOW_DECODED) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_TOW_DECODED [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_TOW_DECODED))
+
+    elif ctype == CONSTELLATION_SBAS: # SBAS
+        if (state & STATE_CODE_LOCK) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_CODE_LOCK))
+
+    elif ctype == CONSTELLATION_GLONASS: # GLONASS
+        if (state & STATE_CODE_LOCK) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_CODE_LOCK))
+        if (state & STATE_GLO_TOD_DECODED) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_GLO_TOD_DECODED [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_TOW_DECODED))
+
+    elif ctype == CONSTELLATION_BEIDOU:  # bds 1I 7I 6I
+        if (state & STATE_CODE_LOCK) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_CODE_LOCK))
+        if (state & STATE_TOW_DECODED) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_TOW_DECODED [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_TOW_DECODED))
+
+    elif ctype == CONSTELLATION_GALILEO:
+        if (obscode == '1C', state & STATE_GAL_E1BC_CODE_LOCK) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_GAL_E1BC_CODE_LOCK [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_CODE_LOCK))
+        if (state & STATE_TOW_DECODED) == 0:
+            raise ValueError("State [ 0x{0:2x} {0:8b} ] not STATE_TOW_DECODED [ 0x{1:2x} {1:8b} ] not valid".format(state,STATE_TOW_DECODED))
+    else:
+        pass
 
 
 # ------------------------------------------------------------------------------
@@ -434,6 +490,7 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
                              Default is 0.0
     """
 
+
     try:
         satname = get_satname(measurement)
     except ValueError as e:
@@ -443,16 +500,26 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
     obscode = get_obscode(measurement)
 
     # 检测是否发生周跳
-    lockflag = check_lli(measurement['AccumulatedDeltaRangeState'])
-
-
-    # todo:有其它待检测的状态值
-
-    # Skip this measurement if no synched
+    lockflag = 0
     try:
-        lockflag = check_state(measurement['State'])
+        check_lli(measurement['AccumulatedDeltaRangeState'])
     except ValueError as e:
         sys.stderr.write("-- WARNING: {0} for satellite [ {1} ]\n".format(e, satname))
+        lockflag = 1
+
+    # Skip this measurement if no synched
+    trackflag = 0
+    try:
+        check_state(measurement['ConstellationType'], obscode, measurement['State'])
+    except ValueError as e:
+        sys.stderr.write("-- WARNING: {0} for satellite [ {1} ]\n".format(e, satname))
+        trackflag = 1
+
+    global  HCCC
+    new_hccc = measurement['HardwareClockDiscontinuityCount']
+    if  new_hccc != HCCC:
+        sys.stderr.write("-- WARNING: HardwareClockDiscontinuityCount: [{0}] => [{1}] for satellite [{2}]\n".format(HCCC, new_hccc,satname))
+        HCCC = new_hccc
 
     # Set the fullbiasnanos if not set or if we need to update the full bias
     # nanos at each epoch
@@ -460,20 +527,15 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
 
     # Obtain time nanos and bias nanos. Skip if None
 
-    # CONSTELLATION_GPS = 1
-    # CONSTELLATION_SBAS = 2
-    # CONSTELLATION_GLONASS = 3
-    # CONSTELLATION_QZSS = 4
-    # CONSTELLATION_BEIDOU = 5
-    # CONSTELLATION_GALILEO = 6
-    # CONSTELLATION_UNKNOWN = 0
-
     try:
         timenanos = float(measurement['TimeNanos'])
     except ValueError:
         raise ValueError("-- WARNING: Invalid value of TimeNanos or satellite  [ {0} ]\n".format(satname))
 
-    biasnanos = measurement['BiasNanos']
+    try:
+        biasnanos = measurement['BiasNanos']
+    except ValueError:
+        biasnanos = 0.0
 
     # Compute the GPS week number as well as the time within the week of
     # the reception time (i.e. clock epoch)
@@ -492,28 +554,29 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
     except ValueError:
         timeoffsetnanos = 0.0
 
-    try:
-        biasnanos = measurement['BiasNanos']
-    except ValueError:
-        biasnanos = 0.0
-
     # Compute the reception and transmission times
-    tRxSeconds = gpssow - timeoffsetnanos * NS_TO_S
+    tRxSeconds = gpssow + timeoffsetnanos * NS_TO_S
 
     ctype = measurement['ConstellationType']
     tTxSeconds = 0
+
     if ctype == 1:# gps
         tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+
     elif ctype == 2:
         tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+
     elif ctype == 3:# glo
         tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
         txint = round(tRxSeconds/86400)*86400
         tTxSeconds = round(tRxSeconds/86400)*86400 - 10800 + tTxSeconds + 18
-    elif ctype == 4:
+
+    elif ctype == 4: # qzss
         tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
+
     elif ctype == 5: # bds
         tTxSeconds = measurement['ReceivedSvTimeNanos'] * NS_TO_S + 14
+
     elif ctype == 6: # gal
         tTxSeconds = float(measurement['ReceivedSvTimeNanos']) * NS_TO_S
     else:
@@ -542,18 +605,27 @@ def process(measurement, fullbiasnanos=None, integerize=False, pseudorange_bias=
     # Process the accumulated delta range (i.e. carrier phase). This
     # needs to be translated from meters to cycles (i.e. RINEX format
     # specification)
-    cphase = measurement['AccumulatedDeltaRangeMeters'] / wavelength
+    cphase = - measurement['AccumulatedDeltaRangeMeters'] / wavelength
 
     doppler = - measurement['PseudorangeRateMetersPerSecond'] / wavelength
 
     cn0 = measurement['Cn0DbHz']
+
+    # # 有周跳相位置零
+    # if lockflag:
+    #     cphase = 0.0
+
+    # 跟踪状态异常,伪距置零
+    if trackflag:
+        range = 0.0
 
     return { EPOCH_STR : epoch,
              satname : { 'C' + obscode : range,
                          'L' + obscode : cphase,
                          'D' + obscode : doppler,
                          'S' + obscode : cn0,
-                         'LLI' : lockflag
+                         'TRACK': trackflag,
+                         'LLI': lockflag
                          }
              }
 
